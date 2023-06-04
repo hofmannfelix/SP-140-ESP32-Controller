@@ -6,7 +6,7 @@
 #include <StaticThreadController.h>
 #include <CircularBuffer.h>
 
-#define BUTTON_PIN D1
+#define BUTTON_PIN D0
 #define THROTTLE_PIN A3
 #define ESC_PWM_PIN A2
 #define ESC_RX_PIN D7
@@ -21,6 +21,8 @@
 #define ESC_MAX_PWM 1990  // ESC max 1950
 #define ANALOG_READ_MAX 4090
 #define POT_READ_MAX (4090 / 4)
+#define POT_MIN_OFFSET 80  // Pot value delta to actually accelerate to make it less touchy
+#define POT_OUT_OF_BOUNDS_VALUE 100 // Stop throttle if values are out of throttle limits (just for safety)
 #define BATT_MIN_V 49.0  // 7S min (use 42v for 6S)
 #define BATT_MAX_V 58.8  // 7S max (use 50v for 6S)
 #define INITIALIZED_THRESHOLD 10 // set initial value after pot value is table (delta < 10)
@@ -50,7 +52,7 @@ class BleData {
 };
 
 // Power Switch
-ezButton powerSwitch(D1);
+ezButton powerSwitch(BUTTON_PIN);
 auto startTime = millis();
 
 // ESC

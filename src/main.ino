@@ -12,6 +12,7 @@ void setup() {
 
   // setup power switch button
   powerSwitch.setDebounceTime(50);
+  pinMode(BUTTON_PIN, INPUT_PULLUP);
 
   // setup Throttle
   analogReadResolution(12);
@@ -76,7 +77,7 @@ void handleThrottle() {
     potBuffer.push(potRaw);
   }
 
-  if (millis() - startTime < 5000) return;
+  if (millis() - startTime < 2000) return;
 
   if (prevPotLvl != potLvl) {
     Serial.print("pwmSignal: ");
@@ -91,8 +92,12 @@ void handleThrottle() {
     Serial.println(potRaw);
   }
 
+  static bool isArmedd = false;
+  if (isArmed() != isArmedd) Serial.println(isArmed() ? "armed" : "disarmed");
+  isArmedd = isArmed();
+
   // set initial potentiometer Lvl if changes are less than INITIALIZED_THRESHOLD
-  auto isInitialized = initialPotLvl != -1 || abs(potLvl - prevPotLvl) < INITIALIZED_THRESHOLD;
+  auto isInitialized = isArmed() && (initialPotLvl != -1 || abs(potLvl - prevPotLvl) < INITIALIZED_THRESHOLD);
   potLvl = limitedThrottle(potLvl, prevPotLvl, 120);
 
   if (isInitialized && initialPotLvl == -1) {
@@ -101,15 +106,18 @@ void handleThrottle() {
     Serial.println(potLvl);
   }
 
-  // if (!isArmed()) {
-  if (isInitialized) {
+  if (isArmed() && isInitialized) {
     // calculate pwm signal relative to the initial potentiometer Lvl
-    pwmSignal = mapd(potLvl, initialPotLvl, initialPotLvl + POT_READ_MAX, ESC_MIN_PWM, ESC_MAX_PWM);
-    //if (pwmSignal > 1200)
-      esc.writeMicroseconds(min(1200, pwmSignal));
-    //else esc.writeMicroseconds(ESC_MIN_PWM);
+    pwmSignal = mapd(potLvl - POT_MIN_OFFSET, initialPotLvl, initialPotLvl + POT_READ_MAX, ESC_MIN_PWM, ESC_MAX_PWM);
+    
+    // set pwm to min if potLvl is out of bounds
+    if (constrain(potLvl, initialPotLvl - POT_OUT_OF_BOUNDS_VALUE, initialPotLvl + POT_READ_MAX + POT_OUT_OF_BOUNDS_VALUE) == potLvl) {
+      esc.writeMicroseconds(pwmSignal);
+    } else {
+      esc.writeMicroseconds(ESC_MIN_PWM);
+    }
   } else {
-    // if (!isArmed()) initialPotLvl = -1;
+    if (!isArmed()) initialPotLvl = -1;
     esc.writeMicroseconds(ESC_DISARMED_PWM);
   }
 }
@@ -149,11 +157,6 @@ void handleBleData() {
   bleData.power = mapd(pwmSignal, ESC_MIN_PWM, ESC_MAX_PWM, 0, 100);
   //TODO: rpm, temperature
 
-  // bleData.batteryPercentage += 0.02;
-  // bleData.amps = random(0, 200);
-  // bleData.usedKwh += 0.002;
-  // bleData.kW = random(0, 100);
-
   batteryCharacteristic.writeValue(bleData.batteryPercentage);
   voltageCharacteristic.writeValue(bleData.volts);
   temperatureCharacteristic.writeValue(bleData.temperatureC);
@@ -185,7 +188,8 @@ int limitedThrottle(int current, int last, int threshold) {
 
 bool isArmed() {
   powerSwitch.loop();
-  return powerSwitch.getState() == HIGH;
+  return powerSwitch.getState() == LOW;
+  // return analogRead(BUTTON_PIN) == LOW;
 }
 
 double mapd(double x, double in_min, double in_max, double out_min, double out_max) {
