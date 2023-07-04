@@ -5,10 +5,12 @@
 #include <StaticThreadController.h>
 #include <ezButton.h>
 #include <WiFi.h>
+#include <Adafruit_SleepyDog.h>
 #include "globals.h"
 
 void setup() {
   Serial.begin(115200);
+  Watchdog.enable(4000);
 
   // setup power switch button
   powerSwitch.setDebounceTime(50);
@@ -51,7 +53,7 @@ void setup() {
   BLE.advertise();
 
   bleThread.onRun(handleBleData);
-  bleThread.setInterval(1000);
+  bleThread.setInterval(bleThreadInterval);
 }
 
 void loop() {
@@ -59,6 +61,8 @@ void loop() {
 }
 
 void handleThrottle() {
+  Watchdog.reset();
+
   pot.update();
   bool containsBigDeltaValues = false;
   int potRaw = ANALOG_READ_MAX - pot.getValue();
@@ -91,10 +95,6 @@ void handleThrottle() {
     Serial.print(" rawPotLvl: ");
     Serial.println(potRaw);
   }
-
-  static bool isArmedd = false;
-  if (isArmed() != isArmedd) Serial.println(isArmed() ? "armed" : "disarmed");
-  isArmedd = isArmed();
 
   // set initial potentiometer Lvl if changes are less than INITIALIZED_THRESHOLD
   auto isInitialized = isArmed() && (initialPotLvl != -1 || abs(potLvl - prevPotLvl) < INITIALIZED_THRESHOLD);
@@ -144,7 +144,16 @@ void handleTelemetry() {
 }
 
 void handleBleData() {
+  // change thread interval if BLE is connected vs connecting so connection process is faster
+  auto isBleConnectionThresholdReached = millis() - bleConnectedTime > BLE_CONNECTION_THREASHOLD;
+  if (!isBleConnectionThresholdReached && bleThreadInterval != BLE_CONNECTING_THREAD_INTERVAL) {
+    bleThread.setInterval(bleThreadInterval = BLE_CONNECTING_THREAD_INTERVAL);
+  } else if (isBleConnectionThresholdReached && bleThreadInterval != BLE_CONNECTED_THREAD_INTERVAL) {
+    bleThread.setInterval(bleThreadInterval = BLE_CONNECTED_THREAD_INTERVAL);
+  }
+
   if (!central || !central.connected()) {
+    bleConnectedTime = millis();
     central = BLE.central();
     return;
   }
@@ -165,8 +174,6 @@ void handleBleData() {
   usedKwhCharacteristic.writeValue(bleData.usedKwh);
   kWCharacteristic.writeValue(bleData.kW);
   powerCharacteristic.writeValue(bleData.power);
-
-  Serial.println(bleData.power);
 }
 
 // /// region Helper functions

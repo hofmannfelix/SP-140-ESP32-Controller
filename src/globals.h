@@ -27,6 +27,10 @@
 #define BATT_MAX_V 58.8  // 7S max (use 50v for 6S)
 #define INITIALIZED_THRESHOLD 10 // set initial value after pot value is table (delta < 10)
 
+#define BLE_CONNECTION_THREASHOLD 10000
+#define BLE_CONNECTED_THREAD_INTERVAL 1000
+#define BLE_CONNECTING_THREAD_INTERVAL 50
+
 class EscTelemetry {
   public:
   float volts;
@@ -71,6 +75,8 @@ int initialPotLvl = -1;
 int pwmSignal = 0;
 
 // Bluetooth® Low Energy LED Service
+auto bleConnectedTime = millis();
+auto bleThreadInterval = BLE_CONNECTING_THREAD_INTERVAL;
 BleData bleData = BleData();
 BLEService bleService("19B10000-E8F2-537E-4F6C-D104768A1214");
 BLEDevice central;
