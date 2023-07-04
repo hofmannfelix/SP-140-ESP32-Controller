@@ -64,22 +64,12 @@ void handleThrottle() {
   Watchdog.reset();
 
   pot.update();
-  bool containsBigDeltaValues = false;
   int potRaw = ANALOG_READ_MAX - pot.getValue();
   int potLvl = 0;
   for (auto i = 0; i < potBuffer.size(); i++) {
     potLvl += potBuffer[i] / potBuffer.size();
   }
-  for (auto i = 0; i < potBuffer.size(); i++) {
-    if (abs(potBuffer[i] - potLvl) > POT_READ_MAX * 0.02) {
-      containsBigDeltaValues = true;
-      break;
-    }
-  }
-  // overwrite values with big deltas but ignore pot changes of less than 2% to reduce noise
-  if (containsBigDeltaValues || abs(potRaw - potLvl) > POT_READ_MAX * 0.02) {
-    potBuffer.push(potRaw);
-  }
+  potBuffer.push(potRaw);
 
   if (millis() - startTime < 2000) return;
 
