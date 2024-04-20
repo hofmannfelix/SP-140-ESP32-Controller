@@ -15,6 +15,8 @@ void setup() {
   // setup power switch button
   powerSwitch.setDebounceTime(50);
   pinMode(BUTTON_PIN, INPUT_PULLUP);
+  powerSwitchThread.onRun(handlePowerSwitch);
+  powerSwitchThread.setInterval(22);
 
   // setup Throttle
   analogReadResolution(12);
@@ -23,7 +25,7 @@ void setup() {
   throttleThread.setInterval(22);
 
   // setup ESC
-  SerialESC.begin(ESC_BAUD_RATE, SERIAL_8N1, ESC_TX_PIN, ESC_RX_PIN);
+  SerialESC.begin(ESC_BAUD_RATE, 134217756UL, ESC_TX_PIN, ESC_RX_PIN);
   SerialESC.setTimeout(ESC_TIMEOUT);
 
   esc.attach(ESC_PWM_PIN);
@@ -31,6 +33,7 @@ void setup() {
 
   trackPowerThread.onRun(handlePowerTracking);
   trackPowerThread.setInterval(250);
+
   telemetryThread.onRun(handleTelemetry);
   telemetryThread.setInterval(50);
 
@@ -49,6 +52,9 @@ void setup() {
   bleService.addCharacteristic(kWCharacteristic);
   bleService.addCharacteristic(usedKwhCharacteristic);
   bleService.addCharacteristic(powerCharacteristic);
+  bleService.addCharacteristic(armedCharacteristic);
+  bleService.addCharacteristic(cruiseCharacteristic);
+
   BLE.addService(bleService);
   BLE.advertise();
 
@@ -58,6 +64,29 @@ void setup() {
 
 void loop() {
   threads.run();
+}
+
+void handlePowerSwitch() {
+  powerSwitch.loop();
+  auto armed = powerSwitch.getState() == LOW;
+  static auto lastSwitchOff = millis();
+  static bool isSwitchOn = armed;
+  bool hasSwitched = armed != isSwitchOn;
+  if (hasSwitched) {
+    isSwitchOn = armed;
+    if (!armed) lastSwitchOff = millis();
+  }
+  auto isQuickToggled = millis() - lastSwitchOff < 500;
+
+  if (hasSwitched && armed && isQuickToggled) {
+    isCruiseEnabled = true;
+  }
+
+  if (armed) {
+    isArmed = true;
+  } else if (!isQuickToggled) {
+    isArmed = false;
+  }
 }
 
 void handleThrottle() {
@@ -86,8 +115,8 @@ void handleThrottle() {
     Serial.println(potRaw);
   }
 
-  // set initial potentiometer Lvl if changes are less than INITIALIZED_THRESHOLD
-  auto isInitialized = isArmed() && (initialPotLvl != -1 || abs(potLvl - prevPotLvl) < INITIALIZED_THRESHOLD);
+  // set initial potentiometer Lvl once value changes are less than INITIALIZED_THRESHOLD
+  auto isInitialized = isArmed && (initialPotLvl != -1 || abs(potLvl - prevPotLvl) < INITIALIZED_THRESHOLD);
   potLvl = limitedThrottle(potLvl, prevPotLvl, 120);
 
   if (isInitialized && initialPotLvl == -1) {
@@ -96,18 +125,34 @@ void handleThrottle() {
     Serial.println(potLvl);
   }
 
-  if (isArmed() && isInitialized) {
+  if (isArmed && isInitialized) {
     // calculate pwm signal relative to the initial potentiometer Lvl
     pwmSignal = mapd(potLvl - POT_MIN_OFFSET, initialPotLvl, initialPotLvl + POT_READ_MAX, ESC_MIN_PWM, ESC_MAX_PWM);
     
-    // set pwm to min if potLvl is out of bounds
+    // ensure pwm is within bounds
     if (constrain(potLvl, initialPotLvl - POT_OUT_OF_BOUNDS_VALUE, initialPotLvl + POT_READ_MAX + POT_OUT_OF_BOUNDS_VALUE) == potLvl) {
-      esc.writeMicroseconds(pwmSignal);
+      if (isCruiseEnabled && cruisePwm == 0) {
+        cruisePwm = pwmSignal;
+        Serial.println(cruisePwm);
+      }
+      if (pwmSignal > cruisePwm * 1.05) {
+        isCruiseEnabled = false;
+        cruisePwm = 0;
+      }
+      if (cruisePwm > 0) {
+        esc.writeMicroseconds(cruisePwm);
+      } else {
+        esc.writeMicroseconds(pwmSignal);
+      }
     } else {
       esc.writeMicroseconds(ESC_MIN_PWM);
     }
   } else {
-    if (!isArmed()) initialPotLvl = -1;
+    if (!isArmed) {
+      initialPotLvl = -1;
+      isCruiseEnabled = false;
+      cruisePwm = 0;
+    }
     esc.writeMicroseconds(ESC_DISARMED_PWM);
   }
 }
@@ -118,19 +163,16 @@ void handlePowerTracking() {
   unsigned long msec_diff = (currentPwrMillis - prevPwrMillis);  // eg 0.30 sec
   prevPwrMillis = currentPwrMillis;
 
-  if (isArmed()) {
+  if (isArmed) {
     wattsHoursUsed += round(watts/60/60*msec_diff)/1000.0;
   }
 }
 
 void handleTelemetry() {
-  while (SerialESC.available() > 0) {
-    SerialESC.read();
-  }
-  SerialESC.readBytes(escData, ESC_DATA_SIZE);
-  if (enforceFletcher16()) {
-    parseTelemetryData();
-  }
+  prepareSerialRead();
+  SerialESC.readBytes(escDataV2, ESC_DATA_SIZE);
+  //printRawSentence();
+  handleSerialData(escDataV2);
 }
 
 void handleBleData() {
@@ -153,8 +195,9 @@ void handleBleData() {
   bleData.amps = telemetryData.amps;
   bleData.kW = constrain(watts / 1000.0, 0, 50);
   bleData.usedKwh = wattsHoursUsed / 1000;
-  bleData.power = mapd(pwmSignal, ESC_MIN_PWM, ESC_MAX_PWM, 0, 100);
-  //TODO: rpm, temperature
+  bleData.power = mapd(max(pwmSignal, cruisePwm), ESC_MIN_PWM, ESC_MAX_PWM, 0, 100);
+  bleData.rpm = telemetryData.eRPM;
+  bleData.temperatureC = telemetryData.temperatureC;
 
   batteryCharacteristic.writeValue(bleData.batteryPercentage);
   voltageCharacteristic.writeValue(bleData.volts);
@@ -164,9 +207,11 @@ void handleBleData() {
   usedKwhCharacteristic.writeValue(bleData.usedKwh);
   kWCharacteristic.writeValue(bleData.kW);
   powerCharacteristic.writeValue(bleData.power);
+  armedCharacteristic.writeValue(isArmed);
+  cruiseCharacteristic.writeValue(isCruiseEnabled);
 }
 
-// /// region Helper functions
+/// region Helper functions
 
 // throttle easing function based on threshold/performance mode
 int limitedThrottle(int current, int last, int threshold) {
@@ -183,88 +228,150 @@ int limitedThrottle(int current, int last, int threshold) {
   return current;
 }
 
-bool isArmed() {
-  powerSwitch.loop();
-  return powerSwitch.getState() == LOW;
-  // return analogRead(BUTTON_PIN) == LOW;
-}
-
 double mapd(double x, double in_min, double in_max, double out_min, double out_max) {
   return (constrain(x, in_min, in_max) - in_min) * (out_max - out_min) / (in_max - in_min) + out_min;
 }
 
-void parseTelemetryData() {
-  // LSB First
-  // TODO is this being called even with no ESC?
+void prepareSerialRead() {  // TODO needed?
+  while (SerialESC.available() > 0) {
+    SerialESC.read();
+  }
+}
 
-  uint16_t _volts = word(escData[1], escData[0]);
-  telemetryData.volts = _volts / 100.0;
+void handleSerialData(byte buffer[]) {
+  if (buffer[20] != 255 || buffer[21] != 255) {
+    //Serial.println("no stop byte");
+    return; //Stop byte of 65535 not received
+  }
+
+  //Check the fletcher checksum
+  int checkFletch = checkFletcher16(buffer);
+
+  // checksum
+  raw_telemdata.CSUM_HI = buffer[19];
+  raw_telemdata.CSUM_LO = buffer[18];
+
+  //TODO alert if no new data in 3 seconds
+  int checkCalc = (int)(((raw_telemdata.CSUM_HI << 8) + raw_telemdata.CSUM_LO));
+
+  // Checksums do not match
+  if (checkFletch != checkCalc) {
+    return;
+  }
+  // Voltage
+  raw_telemdata.V_HI = buffer[1];
+  raw_telemdata.V_LO = buffer[0];
+
+  float voltage = (raw_telemdata.V_HI << 8 | raw_telemdata.V_LO) / 100.0;
+  telemetryData.volts = voltage; //Voltage
 
   if (telemetryData.volts > BATT_MIN_V) {
-    telemetryData.volts += 1.5;  // calibration
+    telemetryData.volts += 1.0; // calibration
   }
 
-  if (telemetryData.volts > 1) {  // ignore empty data
-    voltageBuffer.push(telemetryData.volts);
+  voltageBuffer.push(telemetryData.volts);
+
+  // Temperature
+  raw_telemdata.T_HI = buffer[3];
+  raw_telemdata.T_LO = buffer[2];
+
+  float rawVal = (float)((raw_telemdata.T_HI << 8) + raw_telemdata.T_LO);
+
+  static int SERIESRESISTOR = 10000;
+  static int NOMINAL_RESISTANCE = 10000;
+  static int NOMINAL_TEMPERATURE = 25;
+  static int BCOEFFICIENT = 3455;
+
+  //convert value to resistance
+  float Rntc = (4096 / (float) rawVal) - 1;
+  Rntc = SERIESRESISTOR / Rntc;
+
+  // Get the temperature
+  float temperature = Rntc / (float) NOMINAL_RESISTANCE; // (R/Ro)
+  temperature = (float) log(temperature); // ln(R/Ro)
+  temperature /= BCOEFFICIENT; // 1/B * ln(R/Ro)
+
+  temperature += 1.0 / ((float) NOMINAL_TEMPERATURE + 273.15); // + (1/To)
+  temperature = 1.0 / temperature; // Invert
+  temperature -= 273.15; // convert to Celsius
+
+  // filter bad values
+  if (temperature < 0 || temperature > 200) {
+    telemetryData.temperatureC = __FLT_MIN__;
+  } else {
+    temperature = (float) trunc(temperature * 100) / 100; // 2 decimal places
+    telemetryData.temperatureC = temperature;
   }
 
-  uint16_t _temperatureC = word(escData[3], escData[2]);
-  telemetryData.temperatureC = _temperatureC/100.0;
-  // reading 17.4C = 63.32F in 84F ambient?
-
-  int16_t _amps = word(escData[5], escData[4]);
-  telemetryData.amps = _amps;
+  // Current
+  auto _amps = word(buffer[5], buffer[4]);
+  telemetryData.amps = _amps / 12.5;
 
   watts = telemetryData.amps * telemetryData.volts;
 
-  // 7 and 6 are reserved bytes
-  int16_t _eRPM = escData[11];     // 0
-  _eRPM << 8;
-  _eRPM += escData[10];    // 0
-  _eRPM << 8;
-  _eRPM += escData[9];     // 30
-  _eRPM << 8;
-  _eRPM += escData[8];     // b4
-  telemetryData.eRPM = _eRPM/6.0/2.0;
+  // Reserved
+  raw_telemdata.R0_HI = buffer[7];
+  raw_telemdata.R0_LO = buffer[6];
 
-  uint16_t _inPWM = word(escData[13], escData[12]);
-  telemetryData.inPWM = _inPWM/100.0;
+  // eRPM
+  raw_telemdata.RPM0 = buffer[11];
+  raw_telemdata.RPM1 = buffer[10];
+  raw_telemdata.RPM2 = buffer[9];
+  raw_telemdata.RPM3 = buffer[8];
 
-  uint16_t _outPWM = word(escData[15], escData[14]);
-  telemetryData.outPWM = _outPWM/100.0;
+  int poleCount = 62;
+  int currentERPM = (int)((raw_telemdata.RPM0 << 24) + (raw_telemdata.RPM1 << 16) + (raw_telemdata.RPM2 << 8) + (raw_telemdata.RPM3 << 0)); //ERPM output
+  int currentRPM = currentERPM / poleCount;  // Real RPM output
+  telemetryData.eRPM = currentRPM;
 
-  // 17 and 16 are reserved bytes
-  // 19 and 18 is checksum
-  telemetryData.checksum = word(escData[19], escData[18]);
+  // Input Duty
+  raw_telemdata.DUTYIN_HI = buffer[13];
+  raw_telemdata.DUTYIN_LO = buffer[12];
+
+  int throttleDuty = (int)(((raw_telemdata.DUTYIN_HI << 8) + raw_telemdata.DUTYIN_LO) / 10);
+  telemetryData.inPWM = (throttleDuty / 10); //Input throttle
+
+  // Motor Duty
+  raw_telemdata.MOTORDUTY_HI = buffer[15];
+  raw_telemdata.MOTORDUTY_LO = buffer[14];
+
+  int motorDuty = (int)(((raw_telemdata.MOTORDUTY_HI << 8) + raw_telemdata.MOTORDUTY_LO) / 10);
+  int currentMotorDuty = (motorDuty / 10); //Motor duty cycle
+
+  // Reserved
+  // raw_telemdata.R1 = buffer[17];
+
+  /* Status Flags
+  # Bit position in byte indicates flag set, 1 is set, 0 is default
+  # Bit 0: Motor Started, set when motor is running as expected
+  # Bit 1: Motor Saturation Event, set when saturation detected and power is reduced for desync protection
+  # Bit 2: ESC Over temperature event occurring, shut down method as per configuration
+  # Bit 3: ESC Overvoltage event occurring, shut down method as per configuration
+  # Bit 4: ESC Undervoltage event occurring, shut down method as per configuration
+  # Bit 5: Startup error detected, motor stall detected upon trying to start*/
+  raw_telemdata.statusFlag = buffer[16];
+  telemetryData.statusFlag = raw_telemdata.statusFlag;
+  // Serial.print("status ");
+  // Serial.print(raw_telemdata.statusFlag, BIN);
+  // Serial.print(" - ");
+  // Serial.println(" ");
 }
 
-// run checksum and return true if valid
-bool enforceFletcher16() {
-  static unsigned long transmitted = 0;
-  static unsigned long failed = 0;
+int checkFletcher16(byte byteBuffer[]) {
+    int fCCRC16;
+    int i;
+    int c0 = 0;
+    int c1 = 0;
 
-  // Check checksum, revert to previous data if bad:
-  word checksum = (unsigned short)(word(escData[19], escData[18]));
-  unsigned char sum1 = 0;
-  unsigned char sum2 = 0;
-  unsigned short sum = 0;
-  for (int i = 0; i < ESC_DATA_SIZE-2; i++) {
-    sum1 = (unsigned char)(sum1 + escData[i]);
-    sum2 = (unsigned char)(sum2 + sum1);
-  }
-  sum = (unsigned char)(sum1 - sum2);
-  sum = sum << 8;
-  sum |= (unsigned char)(sum2 - 2*sum1);
-
-  if (sum != checksum) {
-    failed++;
-    if (failed >= 1000) { // keep track of how reliable the transmission is
-      transmitted = 1;
-      failed = 0;
+    // Calculate checksum intermediate bytesUInt16
+    for (i = 0; i < 18; i++) //Check only first 18 bytes, skip crc bytes
+    {
+        c0 = (int)(c0 + ((int)byteBuffer[i])) % 255;
+        c1 = (int)(c1 + c0) % 255;
     }
-    return false;
-  }
-  return true;
+    // Assemble the 16-bit checksum value
+    fCCRC16 = ( c1 << 8 ) | c0;
+    return (int)fCCRC16;
 }
 
 float smoothedBatteryVoltage() {
@@ -279,7 +386,6 @@ float smoothedBatteryVoltage() {
   }
   return avg;
 }
-
 
 // simple set of data points from load testing
 // maps voltage to battery percentage
