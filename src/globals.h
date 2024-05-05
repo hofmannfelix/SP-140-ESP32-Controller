@@ -5,6 +5,7 @@
 #include <Thread.h> // run tasks at different intervals
 #include <StaticThreadController.h>
 #include <CircularBuffer.h>
+#include <ezButton.h>
 
 #define BUTTON_PIN D0
 #define THROTTLE_PIN A3
@@ -100,49 +101,3 @@ typedef struct  {
 } telem_t;
 
 static telem_t raw_telemdata;
-
-// Power Switch
-ezButton powerSwitch(BUTTON_PIN);
-bool isCruiseEnabled = false;
-bool isArmed = false;
-
-// Throttle
-ResponsiveAnalogRead pot(THROTTLE_PIN, false);
-CircularBuffer<int, 19> potBuffer;
-auto startTime = millis();
-int prevPotLvl = 0;
-int initialPotLvl = -1;
-int pwmSignal = 0;
-int cruisePwm = 0;
-
-// ESC
-EscTelemetry telemetryData = EscTelemetry();
-Servo esc;
-CircularBuffer<float, 50> voltageBuffer;
-float wattsHoursUsed = 0;
-float watts = 0;
-byte escDataV2[ESC_DATA_SIZE];
-
-// Bluetooth® Low Energy LED Service
-auto bleConnectedTime = millis();
-auto bleThreadInterval = BLE_CONNECTING_THREAD_INTERVAL;
-BleData bleData = BleData();
-BLEService bleService("19B10000-E8F2-537E-4F6C-D104768A1214");
-BLEDevice central;
-BLEDoubleCharacteristic batteryCharacteristic("00000000-0019-b100-01e8-f2537e4f6c00", BLERead | BLENotify);
-BLEDoubleCharacteristic voltageCharacteristic("00000000-0019-b100-01e8-f2537e4f6c01", BLERead | BLENotify);
-BLEDoubleCharacteristic temperatureCharacteristic("00000000-0019-b100-01e8-f2537e4f6c02", BLERead | BLENotify);
-BLEDoubleCharacteristic ampsCharacteristic("00000000-0019-b100-01e8-f2537e4f6c03", BLERead | BLENotify);
-BLEDoubleCharacteristic rpmCharacteristic("00000000-0019-b100-01e8-f2537e4f6c04", BLERead | BLENotify);
-BLEDoubleCharacteristic kWCharacteristic("00000000-0019-b100-01e8-f2537e4f6c05", BLERead | BLENotify);
-BLEDoubleCharacteristic usedKwhCharacteristic("00000000-0019-b100-01e8-f2537e4f6c06", BLERead | BLENotify);
-BLEDoubleCharacteristic powerCharacteristic("00000000-0019-b100-01e8-f2537e4f6c07", BLERead | BLENotify);
-BLEBoolCharacteristic armedCharacteristic("00000000-0019-b100-01e8-f2537e4f6c08", BLERead | BLENotify);
-BLEBoolCharacteristic cruiseCharacteristic("00000000-0019-b100-01e8-f2537e4f6c09", BLERead | BLENotify);
-
-Thread powerSwitchThread = Thread();
-Thread throttleThread = Thread();
-Thread telemetryThread = Thread();
-Thread trackPowerThread = Thread();
-Thread bleThread = Thread();
-StaticThreadController<5> threads(&powerSwitchThread, &throttleThread, &telemetryThread, &trackPowerThread, &bleThread);

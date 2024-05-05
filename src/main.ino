@@ -7,6 +7,54 @@
 #include <WiFi.h>
 #include <Adafruit_SleepyDog.h>
 #include "globals.h"
+#include "CruiseControl.h"
+#include "Helper.h"
+
+// Power Switch
+ezButton powerSwitch(BUTTON_PIN);
+bool isArmed = false;
+
+// Throttle
+ResponsiveAnalogRead pot(THROTTLE_PIN, false);
+CircularBuffer<int, 19> potBuffer;
+CruiseControl cruiseControl;
+auto startTime = millis();
+int prevPotLvl = 0;
+int initialPotLvl = -1;
+int pwmSignal = 0;
+
+// ESC
+EscTelemetry telemetryData = EscTelemetry();
+Servo esc;
+CircularBuffer<float, 50> voltageBuffer;
+float wattsHoursUsed = 0;
+float watts = 0;
+byte escDataV2[ESC_DATA_SIZE];
+
+// Bluetooth® Low Energy LED Service
+auto bleConnectedTime = millis();
+auto bleThreadInterval = BLE_CONNECTING_THREAD_INTERVAL;
+BleData bleData = BleData();
+BLEService bleService("19B10000-E8F2-537E-4F6C-D104768A1214");
+BLEDevice central;
+BLEDoubleCharacteristic batteryCharacteristic("00000000-0019-b100-01e8-f2537e4f6c00", BLERead | BLENotify);
+BLEDoubleCharacteristic voltageCharacteristic("00000000-0019-b100-01e8-f2537e4f6c01", BLERead | BLENotify);
+BLEDoubleCharacteristic temperatureCharacteristic("00000000-0019-b100-01e8-f2537e4f6c02", BLERead | BLENotify);
+BLEDoubleCharacteristic ampsCharacteristic("00000000-0019-b100-01e8-f2537e4f6c03", BLERead | BLENotify);
+BLEDoubleCharacteristic rpmCharacteristic("00000000-0019-b100-01e8-f2537e4f6c04", BLERead | BLENotify);
+BLEDoubleCharacteristic kWCharacteristic("00000000-0019-b100-01e8-f2537e4f6c05", BLERead | BLENotify);
+BLEDoubleCharacteristic usedKwhCharacteristic("00000000-0019-b100-01e8-f2537e4f6c06", BLERead | BLENotify);
+BLEDoubleCharacteristic powerCharacteristic("00000000-0019-b100-01e8-f2537e4f6c07", BLERead | BLENotify);
+BLEBoolCharacteristic armedCharacteristic("00000000-0019-b100-01e8-f2537e4f6c08", BLERead | BLENotify);
+BLEBoolCharacteristic cruiseCharacteristic("00000000-0019-b100-01e8-f2537e4f6c09", BLERead | BLENotify);
+BLEDoubleCharacteristic altitudeCharacteristic("00000000-0019-b100-01e8-f2537e4f6c10", BLEWriteWithoutResponse | BLENotify);
+
+Thread powerSwitchThread = Thread();
+Thread throttleThread = Thread();
+Thread telemetryThread = Thread();
+Thread trackPowerThread = Thread();
+Thread bleThread = Thread();
+StaticThreadController<5> threads(&powerSwitchThread, &throttleThread, &telemetryThread, &trackPowerThread, &bleThread);
 
 void setup() {
   Serial.begin(115200);
@@ -54,6 +102,7 @@ void setup() {
   bleService.addCharacteristic(powerCharacteristic);
   bleService.addCharacteristic(armedCharacteristic);
   bleService.addCharacteristic(cruiseCharacteristic);
+  bleService.addCharacteristic(altitudeCharacteristic);
 
   BLE.addService(bleService);
   BLE.advertise();
@@ -79,7 +128,7 @@ void handlePowerSwitch() {
   auto isQuickToggled = millis() - lastSwitchOff < 500;
 
   if (hasSwitched && armed && isQuickToggled) {
-    isCruiseEnabled = true;
+    cruiseControl.enable();
   }
 
   if (armed) {
@@ -128,19 +177,19 @@ void handleThrottle() {
   if (isArmed && isInitialized) {
     // calculate pwm signal relative to the initial potentiometer Lvl
     pwmSignal = mapd(potLvl - POT_MIN_OFFSET, initialPotLvl, initialPotLvl + POT_READ_MAX, ESC_MIN_PWM, ESC_MAX_PWM);
+    bool isPotWithinBounds = constrain(potLvl, initialPotLvl - POT_OUT_OF_BOUNDS_VALUE, initialPotLvl + POT_READ_MAX + POT_OUT_OF_BOUNDS_VALUE) == potLvl;
     
-    // ensure pwm is within bounds
-    if (constrain(potLvl, initialPotLvl - POT_OUT_OF_BOUNDS_VALUE, initialPotLvl + POT_READ_MAX + POT_OUT_OF_BOUNDS_VALUE) == potLvl) {
-      if (isCruiseEnabled && cruisePwm == 0) {
-        cruisePwm = pwmSignal;
-        Serial.println(cruisePwm);
+    if (isPotWithinBounds) {
+      //pwmSignal > (ESC_MAX_PWM - ESC_MIN_PWM) * 0.2 && 
+      if (cruiseControl.isEnabled() && !cruiseControl.isInitialized()) {
+        cruiseControl.initialize(pwmSignal);
+        Serial.println(pwmSignal);
       }
-      if (pwmSignal > cruisePwm * 1.05) {
-        isCruiseEnabled = false;
-        cruisePwm = 0;
+      if (pwmSignal > cruiseControl.calculateCruisePwm() * 1.05) {
+        cruiseControl.disable();
       }
-      if (cruisePwm > 0) {
-        esc.writeMicroseconds(cruisePwm);
+      if (cruiseControl.isInitialized()) {
+        esc.writeMicroseconds(cruiseControl.calculateCruisePwm());
       } else {
         esc.writeMicroseconds(pwmSignal);
       }
@@ -150,8 +199,7 @@ void handleThrottle() {
   } else {
     if (!isArmed) {
       initialPotLvl = -1;
-      isCruiseEnabled = false;
-      cruisePwm = 0;
+      cruiseControl.disable();
     }
     esc.writeMicroseconds(ESC_DISARMED_PWM);
   }
@@ -171,7 +219,6 @@ void handlePowerTracking() {
 void handleTelemetry() {
   prepareSerialRead();
   SerialESC.readBytes(escDataV2, ESC_DATA_SIZE);
-  //printRawSentence();
   handleSerialData(escDataV2);
 }
 
@@ -195,7 +242,7 @@ void handleBleData() {
   bleData.amps = telemetryData.amps;
   bleData.kW = constrain(watts / 1000.0, 0, 50);
   bleData.usedKwh = wattsHoursUsed / 1000;
-  bleData.power = mapd(max(pwmSignal, cruisePwm), ESC_MIN_PWM, ESC_MAX_PWM, 0, 100);
+  bleData.power = mapd(max(pwmSignal, cruiseControl.calculateCruisePwm()), ESC_MIN_PWM, ESC_MAX_PWM, 0, 100);
   bleData.rpm = telemetryData.eRPM;
   bleData.temperatureC = telemetryData.temperatureC;
 
@@ -208,7 +255,12 @@ void handleBleData() {
   kWCharacteristic.writeValue(bleData.kW);
   powerCharacteristic.writeValue(bleData.power);
   armedCharacteristic.writeValue(isArmed);
-  cruiseCharacteristic.writeValue(isCruiseEnabled);
+  cruiseCharacteristic.writeValue(cruiseControl.isEnabled());
+
+  Serial.print("Power: ");
+  Serial.print(bleData.power);
+  Serial.print(", ");
+  cruiseControl.setCurrentAltitude(altitudeCharacteristic.value());
 }
 
 /// region Helper functions
@@ -226,10 +278,6 @@ int limitedThrottle(int current, int last, int threshold) {
   }
   prevPotLvl = current;
   return current;
-}
-
-double mapd(double x, double in_min, double in_max, double out_min, double out_max) {
-  return (constrain(x, in_min, in_max) - in_min) * (out_max - out_min) / (in_max - in_min) + out_min;
 }
 
 void prepareSerialRead() {  // TODO needed?
