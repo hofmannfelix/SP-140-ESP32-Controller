@@ -1,27 +1,28 @@
 #ifndef CruiseControl_h
 #define CruiseControl_h
 
+#include <QuickPID.h>
+
 class CruiseControl {
-    // maximum pwm percentage adjustment that can be made between two altitude updates
-    const int maxAdjustmentPercentage = 10;
-    // minimum interval between a throttle adjustment
     const int throttleAdjustmentFrequencyMs = 1000;
-
-    unsigned long lastAltitudeUpdate = 0;
+    const float requiredAltitudeInMetersAGL = 100;
+    const float cruiseValueMin = 0, cruiseValueMax = 75;
+    const float Kp = 1.0, Ki = 0.1, Kd = 0.1;
+    
+    QuickPID pid;
     bool isCruiseEnabled = false;
-    int initialCruisePwm = 0;
-    double cruiseAltitude = 0;
-    double currentAltitude = 0;
-
-    double previousAltitudeDelta = 0;
-    double previousPwmDelta = 0;
+    float cruiseValue = 0;
+    float cruiseAltitude = 0;
+    float currentAltitude = 0;
 
 public:
+    CruiseControl();
     void enable();
     void disable();
     void initialize(int initialPwm);
     bool isEnabled();
     bool isInitialized();
+    bool hasRequiredAltitude();
     void setCurrentAltitude(double newAltitude);
     int calculateCruisePwm();
 };

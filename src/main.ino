@@ -127,7 +127,7 @@ void handlePowerSwitch() {
   }
   auto isQuickToggled = millis() - lastSwitchOff < 500;
 
-  if (hasSwitched && armed && isQuickToggled) {
+  if (hasSwitched && armed && isQuickToggled && cruiseControl.hasRequiredAltitude()) {
     cruiseControl.enable();
   }
 
@@ -180,10 +180,8 @@ void handleThrottle() {
     bool isPotWithinBounds = constrain(potLvl, initialPotLvl - POT_OUT_OF_BOUNDS_VALUE, initialPotLvl + POT_READ_MAX + POT_OUT_OF_BOUNDS_VALUE) == potLvl;
     
     if (isPotWithinBounds) {
-      //pwmSignal > (ESC_MAX_PWM - ESC_MIN_PWM) * 0.2 && 
       if (cruiseControl.isEnabled() && !cruiseControl.isInitialized()) {
         cruiseControl.initialize(pwmSignal);
-        Serial.println(pwmSignal);
       }
       if (pwmSignal > cruiseControl.calculateCruisePwm() * 1.05) {
         cruiseControl.disable();

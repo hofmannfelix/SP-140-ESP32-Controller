@@ -1,45 +1,38 @@
 #include "globals.h"
 #include "Helper.h"
 #include "CruiseControl.h"
-#include <QuickPID.h>
+
+CruiseControl::CruiseControl() : pid(&currentAltitude, &cruiseValue, &cruiseAltitude) {
+    pid.SetOutputLimits(cruiseValueMin, cruiseValueMax);
+    pid.SetSampleTimeUs(throttleAdjustmentFrequencyMs * 1000);
+    pid.SetTunings(Kp, Ki, Kd);
+    pid.SetMode(QuickPID::Control::automatic);
+}
 
 void CruiseControl::enable() { isCruiseEnabled = true; }
 
 void CruiseControl::disable() { 
     isCruiseEnabled = false;
-    initialCruisePwm = 0;
+    cruiseValue = -1;
 }
 
 void CruiseControl::initialize(int initialPwm) {
-    initialCruisePwm = initialPwm;
-    cruiseAltitude = currentAltitude;
+    cruiseValue = mapd(initialPwm, ESC_MIN_PWM, ESC_MAX_PWM, 0, 100);
+    cruiseAltitude = closestDivisibleBy(currentAltitude, 5);
+    pid.Reset();
 }
 
 bool CruiseControl::isEnabled() { return isCruiseEnabled; }
 
-bool CruiseControl::isInitialized() { return initialCruisePwm != 0; }
+bool CruiseControl::isInitialized() { return cruiseValue != -1; }
 
-void CruiseControl::setCurrentAltitude(double newAltitude) {
-    if (lastAltitudeUpdate >= millis() - throttleAdjustmentFrequencyMs) return;
-    lastAltitudeUpdate = millis();
-    currentAltitude = newAltitude;
+bool CruiseControl::hasRequiredAltitude() { return currentAltitude > requiredAltitudeInMetersAGL; }
 
-    Serial.print("Altitude: ");
-    Serial.print(newAltitude);
-    Serial.print(" Target Alt: ");
-    Serial.println(cruiseAltitude);
-}
+void CruiseControl::setCurrentAltitude(double newAltitude) { currentAltitude = newAltitude; }
 
 int CruiseControl::calculateCruisePwm() {
-    if (initialCruisePwm == 0) return 0;
+    if (!isInitialized()) return 0;
 
-    double altitudeDelta = cruiseAltitude - currentAltitude;
-    int pwmRange = ESC_MAX_PWM - ESC_MIN_PWM;
-    int tenPercentPwmStep = pwmRange / maxAdjustmentPercentage;
-    double cruisePwmDelta = mapd(altitudeDelta, -2, 2, -tenPercentPwmStep, tenPercentPwmStep);
-    double smoothedDelta = cruisePwmDelta * (previousAltitudeDelta > 0 ? (altitudeDelta / previousAltitudeDelta) : 1);
-    previousAltitudeDelta = altitudeDelta;
-    currentAltitude = cruiseAltitude;
-    initialCruisePwm = constrain(initialCruisePwm + cruisePwmDelta, ESC_MIN_PWM + pwmRange * 0.25, ESC_MAX_PWM - pwmRange * 0.25);
-    return initialCruisePwm;
+    pid.Compute();
+    return mapd(cruiseValue, 0, 100, ESC_MIN_PWM, ESC_MAX_PWM);
 }
