@@ -21,8 +21,8 @@
 #define ESC_MIN_PWM 1030  // ESC min is 1050
 #define ESC_MAX_PWM 1990  // ESC max 1950
 #define ANALOG_READ_MAX 4090
-#define POT_READ_MAX (4090 / 4)
-#define POT_MIN_OFFSET 40  // Pot value delta to actually accelerate to make it less touchy
+#define POT_READ_MAX 1000
+#define POT_MIN_OFFSET 20  // Pot value delta to actually accelerate to make it less touchy
 #define POT_OUT_OF_BOUNDS_VALUE 200 // Stop throttle if values are out of throttle limits (for safety)
 #define BATT_MIN_V 49.0  // 7S min (use 42v for 6S)
 #define BATT_MAX_V 58.8  // 7S max (use 50v for 6S)

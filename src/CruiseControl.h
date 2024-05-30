@@ -22,7 +22,7 @@ public:
     void initialize(int initialPwm);
     bool isEnabled();
     bool isInitialized();
-    bool hasRequiredAltitude();
+    bool hasRequiredAltitude(); 
     void setCurrentAltitude(double newAltitude);
     int calculateCruisePwm();
 };

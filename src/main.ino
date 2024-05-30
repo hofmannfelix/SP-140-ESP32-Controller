@@ -9,6 +9,7 @@
 #include "globals.h"
 #include "CruiseControl.h"
 #include "Helper.h"
+#include "StringPrinter.h"
 
 // Power Switch
 ezButton powerSwitch(BUTTON_PIN);
@@ -34,6 +35,7 @@ byte escDataV2[ESC_DATA_SIZE];
 // Bluetooth® Low Energy LED Service
 auto bleConnectedTime = millis();
 auto bleThreadInterval = BLE_CONNECTING_THREAD_INTERVAL;
+StringPrinter bleSerial;
 BleData bleData = BleData();
 BLEService bleService("19B10000-E8F2-537E-4F6C-D104768A1214");
 BLEDevice central;
@@ -48,13 +50,15 @@ BLEDoubleCharacteristic powerCharacteristic("00000000-0019-b100-01e8-f2537e4f6c0
 BLEBoolCharacteristic armedCharacteristic("00000000-0019-b100-01e8-f2537e4f6c08", BLERead | BLENotify);
 BLEBoolCharacteristic cruiseCharacteristic("00000000-0019-b100-01e8-f2537e4f6c09", BLERead | BLENotify);
 BLEDoubleCharacteristic altitudeCharacteristic("00000000-0019-b100-01e8-f2537e4f6c10", BLEWriteWithoutResponse | BLENotify);
+BLECharacteristic logCharacteristic("00000000-0020-b100-01e8-f2537e4f6c00", BLERead | BLENotify, 20);
 
 Thread powerSwitchThread = Thread();
 Thread throttleThread = Thread();
 Thread telemetryThread = Thread();
 Thread trackPowerThread = Thread();
 Thread bleThread = Thread();
-StaticThreadController<5> threads(&powerSwitchThread, &throttleThread, &telemetryThread, &trackPowerThread, &bleThread);
+Thread bleLogThread = Thread();
+StaticThreadController<6> threads(&powerSwitchThread, &throttleThread, &telemetryThread, &trackPowerThread, &bleThread, &bleLogThread);
 
 void setup() {
   Serial.begin(115200);
@@ -87,7 +91,7 @@ void setup() {
 
   // setup BLE
   if (!BLE.begin()) {
-    Serial.println("Starting Bluetooth@ Low Energy module failed!");
+    bleSerial.println("Starting Bluetooth@ Low Energy module failed!");
     while(1);
   }
   BLE.setLocalName("SP-140");
@@ -103,12 +107,15 @@ void setup() {
   bleService.addCharacteristic(armedCharacteristic);
   bleService.addCharacteristic(cruiseCharacteristic);
   bleService.addCharacteristic(altitudeCharacteristic);
+  bleService.addCharacteristic(logCharacteristic);
 
   BLE.addService(bleService);
   BLE.advertise();
 
   bleThread.onRun(handleBleData);
   bleThread.setInterval(bleThreadInterval);
+  bleLogThread.onRun(handleBleLog);
+  bleLogThread.setInterval(100);
 }
 
 void loop() {
@@ -129,11 +136,14 @@ void handlePowerSwitch() {
 
   if (hasSwitched && armed && isQuickToggled && cruiseControl.hasRequiredAltitude()) {
     cruiseControl.enable();
+    bleSerial.println("cruise enabled");
   }
 
   if (armed) {
+    if (!isArmed) bleSerial.println("armed");
     isArmed = true;
   } else if (!isQuickToggled) {
+    if (isArmed) bleSerial.println("disarmed");
     isArmed = false;
   }
 }
@@ -151,17 +161,17 @@ void handleThrottle() {
 
   if (millis() - startTime < 2000) return;
 
-  if (prevPotLvl != potLvl) {
-    Serial.print("pwmSignal: ");
-    Serial.print(pwmSignal);
-    Serial.print(" min max: ");
-    Serial.print(initialPotLvl);
-    Serial.print(" ");
-    Serial.print(initialPotLvl + POT_READ_MAX);
-    Serial.print(" potLvl: ");
-    Serial.print(potLvl);
-    Serial.print(" rawPotLvl: ");
-    Serial.println(potRaw);
+  if (abs(prevPotLvl - potLvl) > 10) {
+    bleSerial.print("pwmSignal: ");
+    bleSerial.print(pwmSignal);
+    bleSerial.print(" min max: ");
+    bleSerial.print(initialPotLvl);
+    bleSerial.print(" ");
+    bleSerial.print(initialPotLvl + POT_READ_MAX);
+    bleSerial.print(" potLvl: ");
+    bleSerial.print(potLvl);
+    bleSerial.print(" rawPotLvl: ");
+    bleSerial.println(potRaw);
   }
 
   // set initial potentiometer Lvl once value changes are less than INITIALIZED_THRESHOLD
@@ -170,8 +180,8 @@ void handleThrottle() {
 
   if (isInitialized && initialPotLvl == -1) {
     initialPotLvl = potLvl;
-    Serial.print("initialized to potLvl: ");
-    Serial.println(potLvl);
+    bleSerial.print("init to potLvl: ");
+    bleSerial.println(potLvl);
   }
 
   if (isArmed && isInitialized) {
@@ -184,6 +194,7 @@ void handleThrottle() {
         cruiseControl.initialize(pwmSignal);
       }
       if (pwmSignal > cruiseControl.calculateCruisePwm() * 1.05) {
+        if (cruiseControl.isEnabled()) bleSerial.println("cruise disabled");
         cruiseControl.disable();
       }
       if (cruiseControl.isInitialized()) {
@@ -196,6 +207,7 @@ void handleThrottle() {
     }
   } else {
     if (!isArmed) {
+      if (cruiseControl.isEnabled()) bleSerial.println("cruise disabled");
       initialPotLvl = -1;
       cruiseControl.disable();
     }
@@ -218,6 +230,11 @@ void handleTelemetry() {
   prepareSerialRead();
   SerialESC.readBytes(escDataV2, ESC_DATA_SIZE);
   handleSerialData(escDataV2);
+}
+
+void handleBleLog() {
+  auto chunk = bleSerial.readChunk();
+  logCharacteristic.writeValue(chunk.c_str(), chunk.length());
 }
 
 void handleBleData() {
@@ -244,6 +261,7 @@ void handleBleData() {
   bleData.rpm = telemetryData.eRPM;
   bleData.temperatureC = telemetryData.temperatureC;
 
+  // write values
   batteryCharacteristic.writeValue(bleData.batteryPercentage);
   voltageCharacteristic.writeValue(bleData.volts);
   temperatureCharacteristic.writeValue(bleData.temperatureC);
@@ -255,9 +273,7 @@ void handleBleData() {
   armedCharacteristic.writeValue(isArmed);
   cruiseCharacteristic.writeValue(cruiseControl.isEnabled());
 
-  Serial.print("Power: ");
-  Serial.print(bleData.power);
-  Serial.print(", ");
+  // read values
   cruiseControl.setCurrentAltitude(altitudeCharacteristic.value());
 }
 
@@ -286,7 +302,7 @@ void prepareSerialRead() {  // TODO needed?
 
 void handleSerialData(byte buffer[]) {
   if (buffer[20] != 255 || buffer[21] != 255) {
-    //Serial.println("no stop byte");
+    //bleSerial.println("no stop byte");
     return; //Stop byte of 65535 not received
   }
 
@@ -350,8 +366,8 @@ void handleSerialData(byte buffer[]) {
   }
 
   // Current
-  auto _amps = word(buffer[5], buffer[4]);
-  telemetryData.amps = _amps / 12.5;
+  auto _amps = word(buffer[5], buffer[4]) / 12.5;
+  if (_amps < 300) telemetryData.amps = _amps; // filter bad values
 
   watts = telemetryData.amps * telemetryData.volts;
 
@@ -397,10 +413,10 @@ void handleSerialData(byte buffer[]) {
   # Bit 5: Startup error detected, motor stall detected upon trying to start*/
   raw_telemdata.statusFlag = buffer[16];
   telemetryData.statusFlag = raw_telemdata.statusFlag;
-  // Serial.print("status ");
-  // Serial.print(raw_telemdata.statusFlag, BIN);
-  // Serial.print(" - ");
-  // Serial.println(" ");
+  // bleSerial.print("status ");
+  // bleSerial.print(raw_telemdata.statusFlag, BIN);
+  // bleSerial.print(" - ");
+  // bleSerial.println(" ");
 }
 
 int checkFletcher16(byte byteBuffer[]) {
