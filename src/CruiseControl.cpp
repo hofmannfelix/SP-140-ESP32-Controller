@@ -2,12 +2,7 @@
 #include "Helper.h"
 #include "CruiseControl.h"
 
-CruiseControl::CruiseControl() : pid(&currentAltitude, &cruiseValue, &cruiseAltitude) {
-    pid.SetOutputLimits(cruiseValueMin, cruiseValueMax);
-    pid.SetSampleTimeUs(throttleAdjustmentFrequencyMs * 1000);
-    pid.SetTunings(Kp, Ki, Kd);
-    pid.SetMode(QuickPID::Control::automatic);
-}
+CruiseControl::CruiseControl() {}
 
 void CruiseControl::enable() { isCruiseEnabled = true; }
 
@@ -19,7 +14,13 @@ void CruiseControl::disable() {
 void CruiseControl::initialize(int initialPwm) {
     cruiseValue = mapd(initialPwm, ESC_MIN_PWM, ESC_MAX_PWM, 0, 100);
     cruiseAltitude = closestDivisibleBy(currentAltitude, 5);
-    pid.Reset();
+
+    if (pid) delete pid;
+    pid = new QuickPID(&currentAltitude, &cruiseValue, &cruiseAltitude);
+    pid->SetOutputLimits(cruiseValueMin, cruiseValueMax);
+    pid->SetSampleTimeUs(throttleAdjustmentFrequencyMs * 1000);
+    pid->SetTunings(Kp, Ki, Kd);
+    pid->SetMode(QuickPID::Control::automatic);
 }
 
 bool CruiseControl::isEnabled() { return isCruiseEnabled; }
@@ -33,6 +34,6 @@ void CruiseControl::setCurrentAltitude(double newAltitude) { currentAltitude = n
 int CruiseControl::calculateCruisePwm() {
     if (!isInitialized()) return 0;
 
-    pid.Compute();
+    pid->Compute();
     return mapd(cruiseValue, 0, 100, ESC_MIN_PWM, ESC_MAX_PWM);
 }

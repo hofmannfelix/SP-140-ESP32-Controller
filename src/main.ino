@@ -6,10 +6,10 @@
 #include <ezButton.h>
 #include <WiFi.h>
 #include <Adafruit_SleepyDog.h>
-#include "globals.h"
 #include "CruiseControl.h"
 #include "Helper.h"
 #include "StringPrinter.h"
+#include "OtaUpdater.h"
 
 // Power Switch
 ezButton powerSwitch(BUTTON_PIN);
@@ -32,10 +32,11 @@ float wattsHoursUsed = 0;
 float watts = 0;
 byte escDataV2[ESC_DATA_SIZE];
 
-// Bluetooth® Low Energy LED Service
+// Bluetooth Low Energy Service
 auto bleConnectedTime = millis();
 auto bleThreadInterval = BLE_CONNECTING_THREAD_INTERVAL;
 StringPrinter bleSerial;
+OtaUpdater otaUpdater;
 BleData bleData = BleData();
 BLEService bleService("19B10000-E8F2-537E-4F6C-D104768A1214");
 BLEDevice central;
@@ -51,6 +52,7 @@ BLEBoolCharacteristic armedCharacteristic("00000000-0019-b100-01e8-f2537e4f6c08"
 BLEBoolCharacteristic cruiseCharacteristic("00000000-0019-b100-01e8-f2537e4f6c09", BLERead | BLENotify);
 BLEDoubleCharacteristic altitudeCharacteristic("00000000-0019-b100-01e8-f2537e4f6c10", BLEWriteWithoutResponse | BLENotify);
 BLECharacteristic logCharacteristic("00000000-0020-b100-01e8-f2537e4f6c00", BLERead | BLENotify, 20);
+BLECharacteristic otaCharacteristic("00000000-0020-b100-01e8-f2537e4f6c01", BLERead | BLEWrite | BLENotify, 20);
 
 Thread powerSwitchThread = Thread();
 Thread throttleThread = Thread();
@@ -58,7 +60,8 @@ Thread telemetryThread = Thread();
 Thread trackPowerThread = Thread();
 Thread bleThread = Thread();
 Thread bleLogThread = Thread();
-StaticThreadController<6> threads(&powerSwitchThread, &throttleThread, &telemetryThread, &trackPowerThread, &bleThread, &bleLogThread);
+Thread otaThread = Thread();
+StaticThreadController<7> threads(&powerSwitchThread, &throttleThread, &telemetryThread, &trackPowerThread, &bleThread, &bleLogThread, &otaThread);
 
 void setup() {
   Serial.begin(115200);
@@ -108,6 +111,7 @@ void setup() {
   bleService.addCharacteristic(cruiseCharacteristic);
   bleService.addCharacteristic(altitudeCharacteristic);
   bleService.addCharacteristic(logCharacteristic);
+  bleService.addCharacteristic(otaCharacteristic);
 
   BLE.addService(bleService);
   BLE.advertise();
@@ -116,6 +120,8 @@ void setup() {
   bleThread.setInterval(bleThreadInterval);
   bleLogThread.onRun(handleBleLog);
   bleLogThread.setInterval(100);
+  otaThread.onRun(handleOta);
+  otaThread.setInterval(1000);
 }
 
 void loop() {
@@ -161,17 +167,17 @@ void handleThrottle() {
 
   if (millis() - startTime < 2000) return;
 
-  if (abs(prevPotLvl - potLvl) > 10) {
-    bleSerial.print("pwmSignal: ");
-    bleSerial.print(pwmSignal);
-    bleSerial.print(" min max: ");
-    bleSerial.print(initialPotLvl);
-    bleSerial.print(" ");
-    bleSerial.print(initialPotLvl + POT_READ_MAX);
-    bleSerial.print(" potLvl: ");
-    bleSerial.print(potLvl);
-    bleSerial.print(" rawPotLvl: ");
-    bleSerial.println(potRaw);
+  if (prevPotLvl != potLvl) {
+    // bleSerial.print("pwmSignal: ");
+    // bleSerial.print(pwmSignal);
+    // bleSerial.print(" min max: ");
+    // bleSerial.print(initialPotLvl);
+    // bleSerial.print(" ");
+    // bleSerial.print(initialPotLvl + POT_READ_MAX);
+    // bleSerial.print(" potLvl: ");
+    // bleSerial.print(potLvl);
+    // bleSerial.print(" rawPotLvl: ");
+    // bleSerial.println(potRaw);
   }
 
   // set initial potentiometer Lvl once value changes are less than INITIALIZED_THRESHOLD
@@ -190,10 +196,15 @@ void handleThrottle() {
     bool isPotWithinBounds = constrain(potLvl, initialPotLvl - POT_OUT_OF_BOUNDS_VALUE, initialPotLvl + POT_READ_MAX + POT_OUT_OF_BOUNDS_VALUE) == potLvl;
     
     if (isPotWithinBounds) {
+      static auto cruiseInitializedTimestamp = millis();
       if (cruiseControl.isEnabled() && !cruiseControl.isInitialized()) {
         cruiseControl.initialize(pwmSignal);
+        cruiseInitializedTimestamp = millis();
+        bleSerial.print("initial cruise pwm: ");
+        bleSerial.println(pwmSignal);
       }
-      if (pwmSignal > cruiseControl.calculateCruisePwm() * 1.05) {
+      // disable cruise control if trigger held more than 4 seconds and more then 20% after enabling it
+      if (pwmSignal > ESC_MIN_PWM + (ESC_MAX_PWM - ESC_MIN_PWM) * 0.2 && millis() - cruiseInitializedTimestamp > 4000) {
         if (cruiseControl.isEnabled()) bleSerial.println("cruise disabled");
         cruiseControl.disable();
       }
@@ -235,6 +246,26 @@ void handleTelemetry() {
 void handleBleLog() {
   auto chunk = bleSerial.readChunk();
   logCharacteristic.writeValue(chunk.c_str(), chunk.length());
+}
+
+void handleOta() {
+  if (isArmed) return;
+
+  int length = otaCharacteristic.valueLength();
+  char otaValue[length + 1];
+  otaCharacteristic.readValue(otaValue, length);
+  otaValue[length] = '\0';
+
+  static std::string updateUrl;
+  if (strcmp(otaValue, "UPDATE") == 0) {
+    bleSerial.println("OTA activated");
+    otaUpdater.activate();
+    updateUrl = "";
+  }
+  auto newUpdatUrl = otaUpdater.getUpdateUrl();
+  if (!newUpdatUrl.empty() && updateUrl != newUpdatUrl) {
+    otaCharacteristic.writeValue((updateUrl = newUpdatUrl).c_str(), newUpdatUrl.length());
+  }
 }
 
 void handleBleData() {

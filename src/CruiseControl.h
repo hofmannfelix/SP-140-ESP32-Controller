@@ -4,12 +4,12 @@
 #include <QuickPID.h>
 
 class CruiseControl {
-    const int throttleAdjustmentFrequencyMs = 1000;
+    const int throttleAdjustmentFrequencyMs = 200;
     const float requiredAltitudeInMetersAGL = 100;
-    const float cruiseValueMin = 0, cruiseValueMax = 75;
+    const float cruiseValueMin = 0, cruiseValueMax = 90;
     const float Kp = 1.0, Ki = 0.1, Kd = 0.1;
     
-    QuickPID pid;
+    QuickPID *pid;
     bool isCruiseEnabled = false;
     float cruiseValue = 0;
     float cruiseAltitude = 0;
